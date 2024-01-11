@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Assigment 2, Data cleaning script, Student No: 22972267 
+# Data Cleaning/ error checking 
 
 # Check if only argument
 if [[ $# -ne 1 ]]
