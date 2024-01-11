@@ -1,0 +1,1340 @@
+---
+title: "Project 2"
+author: "Stevie"
+date: "2023-09-21"
+output: html_document
+---
+
+```{r setup, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(shiny)
+library(gridExtra)
+library(knitr)
+library(readxl)
+library(GGally)
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(ggthemes)
+library(numform)
+library(timeDate)
+library(lubridate)
+library(reshape2)
+library(ca)
+library(ape)
+library(ROCR)
+library(grid)
+library(tidyverse)
+library(data.table)
+library(xgboost)
+library(vtreat)
+library(readxl)
+library(openxlsx)
+library(rattle)
+library(png)
+library(wordcloud2)
+library(httr)
+library(sf)
+library(rnaturalearth)
+library(pROC)
+library(corrplot)
+library(data.table)
+library(verification)
+library(maptree)
+library(glmnet)
+library(randomForest)
+library(mgcv)
+library(nnet)
+library(gbm)
+library(e1071)
+```
+
+## Introduction
+The data set can be retrieved and analysed from the online Kaggle platform. The data set has been collected by NIDULA ELGIRIYEWITHANA, titled "Global YouTube Statistics 2023". https://www.kaggle.com/datasets/nelgiriyewithana/global-youtube-statistics-2023 This analysis also contains recent GDP information from the World Bank through  https://data.worldbank.org/indicator/NY.GDP.PCAP.CD excel download.
+
+This report seeks to provide comprehensive insights for individuals, groups, and organisations interested in creating content on the YouTube platform, focusing on audience reach and profitability. By studying this report, readers can enhance their understanding of the resources and strategies required for effective video content generation to grow their online presence.
+
+Additionally, this report will leverage World Bank data, including GDP development data for various countries. This information will be used to explore the geographical advantages and facilitate more accurate predictive modelling by integrating multiple databases. We will use a target variable suitable for a classification task developed into high vs. low income based on earnings and GDP consideration.
+
+As this analysis targets a novice audience, we recommend checking out these links to gather more information on your YouTube journey. 
+```{r}
+data <- data.frame(
+  Name = c("How to Become a YouTuber and Make Money", "How to Become a YouTuber and Get Paid: 13 Tips for 2023", "How to Become a YouTuber – The Ultimate Checklist"),
+  Hyperlink = c(
+    'https://www.cyberlink.com/blog/youtube-video-editing/58/how-to-become-a-youtuber',
+    'https://blog.hootsuite.com/how-to-become-a-youtuber/',
+    'https://influencermarketinghub.com/how-to-become-a-youtuber/'
+  )
+)
+
+
+kable(data, caption = "Youtuber Guides")
+
+
+```
+
+```{r}
+#data_path <-  "C:/Users/stevi/Downloads/archive2/Global_YouTube_Statistics.csv"  # change to your data path 
+data_path <-  "C:/data_statistics/Global_YouTube_Statistics.csv"
+youtube_stats <- read.csv(data_path, header=TRUE, sep=",") 
+
+```
+
+
+# Filtering Youtube 
+Based on domain knowledge from previous EDA exploration, we can swiftly identify that YouTube was launched on 14/02/2005; this means, logically, we cannot have a channel from an earlier date. Since YouTube was founded in 2005, we will correct this, replacing NAs with a value of 2005, as it is the earliest data to exist. Moreover, we have negative within variables such as subscribers, which is not valid in this data set, as the YouTube statistics are based on the top 1000 Youtubers; hence, negative variables besides created year, population, latitude and longitude will be replaced. NA numerical values will be converted to zero for further cleaning, and NA categorical variables will be masked to a UKNOWN  value.
+
+```{r}
+
+# Replace incorrect 'created_year' values 
+youtube_stats[102, 'created_year'] <- 2005
+
+youtube_stats <- youtube_stats %>%
+  mutate(
+    created_year = ifelse(
+      created_year < 2005 | 
+      (created_year == 2005 & 
+       (created_month == "Feb" & created_date < 14)),
+      NA,
+      created_year
+    )
+  )
+
+youtube_stats$created_year <- ifelse(is.na(youtube_stats$created_year), 2005, youtube_stats$created_year)
+
+youtube_stats <- youtube_stats[, !names(youtube_stats) %in% c("created_month", "created_date")]
+
+# Function to replace specific values with "UNKNOWN"
+replace_with_unknown <- function(data, column_name) {
+  data %>%
+    mutate({{column_name}} := ifelse({{column_name}} %in% c("NA", "nan", "Nan", ""), "UNKNOWN", {{column_name}}))
+}
+
+# Apply the function to each column to ensure NA values have been converted into a masking variable format
+youtube_stats <- youtube_stats %>%
+  replace_with_unknown(Country) %>%
+  replace_with_unknown(channel_type) %>%
+  replace_with_unknown(category)
+
+
+# To deal with numerical NAs, we will convert all NA data to 0
+replace_numerical_nas_with_zeros <- function(data) {
+  # Identify columns with numerical data types
+  numerical_cols <- sapply(data, is.numeric)
+  
+  # Replace NAs in numerical columns with zeros
+  data[, numerical_cols][is.na(data[, numerical_cols])] <- 0
+  
+  return(data)
+}
+
+youtube_stats <- replace_numerical_nas_with_zeros(youtube_stats)
+
+# We will convert all negative data to 0 as zero values such as negative subscribers cannot exist nor uploads and similar variables
+remove_negative_values_except <- function(data, exceptions = c("Latitude", "Longitude")) {
+  # Identify columns with numeric data types, expect latitude and longitude 
+  numerical_cols <- sapply(data, is.numeric)
+  
+  # Identify the columns to exclude from replacing negative values
+  exclude_cols <- names(data) %in% exceptions
+  
+  # Replace negative values with 0 for numeric columns (except exceptions)
+  data[, numerical_cols & !exclude_cols][data[, numerical_cols & !exclude_cols] < 0] <- 0
+  
+  return(data)
+}
+
+youtube_stats <- remove_negative_values_except(youtube_stats)
+```
+
+As previously mentioned, within our dataset, any instances of numerical invalid values or NA values have been converted to 0. Since our dataset consists of the top 1000 YouTubers according to subscriber count from Kaggle, it is not logical to encounter a higher-ranked YouTuber with fewer subscribers. Therefore, we will systematically replace all occurrences of 0 values with the data from the lowest-ranked YouTuber who possesses a complete dataset. This adjustment will be applied across the entire dataset, with the exception of certain variables such as 'created year,' 'population,' 'unemployment,' and 'Gross education.', as these variables, being more independent in nature, will be addressed separately.
+```{r}
+for (i in 1:ncol(youtube_stats)) {
+  col_name <- colnames(youtube_stats)[i]
+  
+  # Check if the column is numeric and not in the exclusion list
+  if (is.numeric(youtube_stats[[i]]) && 
+      !(col_name %in% c("created_year", "Population", "Unemployment.rate", "Gross.tertiary.education.enrollment...."))) {
+    youtube_stats[youtube_stats[[i]] < youtube_stats[995, i], i] <- youtube_stats[995, i]
+  }
+}
+
+```
+
+For the missing values in created year, population, unemployment and Gross education we will instead use the median to replace zero values. 
+```{r}
+youtube_stats <- youtube_stats %>%
+    mutate(Gross.tertiary.education.enrollment.... = ifelse(Gross.tertiary.education.enrollment.... == 0 | is.na(Gross.tertiary.education.enrollment....), median(Gross.tertiary.education.enrollment...., na.rm = TRUE), Gross.tertiary.education.enrollment....))
+
+youtube_stats <- youtube_stats %>%
+    mutate(Unemployment.rate = ifelse(Unemployment.rate == 0 | is.na(Unemployment.rate), median(Unemployment.rate, na.rm = TRUE), Unemployment.rate))
+
+youtube_stats <- youtube_stats %>%
+    mutate(Population = ifelse(Population == 0 | is.na(Population), median(Population, na.rm = TRUE), Population))
+
+```
+
+Before proceeding with the dataset merge, it's essential to examine the correlations to ensure that multicollinearity is not present. Multicollinearity can lead to unstable coefficient estimates and hinder the interpretation of predictor relationships. To facilitate efficient testing, certain columns will be excluded from this subset, including character strings, categorical columns, columns with unique values for each row, and date columns.
+
+```{r}
+subset_numeric_columns <- function(data) {
+    numeric_cols <- sapply(data, is.numeric)
+    numeric_data <- data[, numeric_cols]
+    return(numeric_data)
+}
+
+tet <- subset_numeric_columns(youtube_stats)
+tet[, c("rank", "country_rank", "channel_type_rank", "Title", "subscribers_for_last_30_days", "video_views_for_the_last_30_days", "Longitude", "Latitude")] <- NULL
+
+pairs(tet)
+```
+
+In terms of correlations the income sections had a correlation of 1, this is not what we want when we start modeling techniques. So we will drop all but one income column.
+
+Here we have a multitude of columns that have either a unique value for each row, repetitive or redundant information, hence will be discarded for more clear analysis.
+
+```{r}
+youtube_stats[, c("Abbreviation", "video_views_rank", "highest_monthly_earnings", "lowest_monthly_earnings", "country_rank", "channel_type_rank", "Urban_population", "Title", "subscribers_for_last_30_days", "video_views_for_the_last_30_days", "rank", "Youtuber", "Longitude", "Latitude", "lowest_yearly_earnings")] <- NULL 
+```
+
+We are using log transformation can help make data more normally distributed. This useful as we have multiple variables that have a skewed distribution, which would make our data more unsuitable for modelling. 
+```{r}
+
+# Log-transform 'highest_yearly_earnings'
+youtube_stats$highest_yearly_earnings <- log(youtube_stats$highest_yearly_earnings)
+
+# Log-transform 'subscribers'
+youtube_stats$subscribers <- log(youtube_stats$subscribers)
+
+youtube_stats$video.views <- log(youtube_stats$video.views)
+
+
+youtube_stats$uploads <- log(youtube_stats$uploads)
+```
+
+Lastly as R treats strings as characters we will ensure that all categorical factors have been transformed to factors. 
+```{r}
+youtube_stats <- within(youtube_stats, {
+  category <- as.factor(category)
+  Country <- as.factor(Country)
+  channel_type <- as.factor(channel_type)
+})
+
+```
+
+## Merging WorldBank Data
+
+```{r, message=FALSE}
+#path <- "C:/Users/stevi/Downloads/archive2/" # https://data.worldbank.org/indicator/NY.GDP.PCAP.CD (the excel file)
+path <- "C:/data_statistics/"
+workbook <- paste0(path, "GDP.xls")
+# By default, the first workbook would be read.
+df <- read_excel(workbook)
+df <- df[-c(1:2), ]
+# For formatting reasons the above moves the top two rows as they were empty 
+df[, c("...3", "...4")] <- NULL
+# Removed the redundant columns (has indicator name and code)
+new_col_names <- df[1, ]
+# Uses first row to get column names
+colnames(df) <- new_col_names
+# Add column names to dataframe 
+df <- df[-c(1), ]
+# Remove rows with name of columns 
+
+df$`Country Name` <- as.factor(df$`Country Name`)
+df$`Country Code`<- as.factor(df$`Country Code`)
+df[, 3:65] <- sapply(df[, 3:65], as.numeric)
+# Convert first two columns to factors and then column 3 to 65 to numeric   
+```
+
+```{r}
+df_transposed <- pivot_longer(df, cols = -c("Country Name", "Country Code"), names_to = "Year", values_to = "GDP")
+# Transposes table, easier to read/ merge in 
+
+# Filter data for GDP from 2005 onward for each country
+ most_recent_data <- df_transposed %>%
+  group_by(`Country Name`) %>%
+  filter(!is.na(GDP)) %>%  # Filter out rows with NA GDP
+  filter(as.integer(Year) >= 2005)  # Filter for years starting from 2005
+
+# Change the name of the 'Country Name' column to 'Country' for merging purposes 
+colnames( most_recent_data)[colnames( most_recent_data) == "Country Name"] <- "Country"
+
+most_recent_data <- most_recent_data[,-c(2) ]
+# removed country codes  
+
+# From the 2005 period group the countries GDP and calculate the median to provide a more normalised GDP value 
+median_gdp <- most_recent_data %>%
+    group_by(Country) %>%
+    summarise(Median_GDP = median(GDP))
+```
+
+Before we merge our data set its see what countries don't make sense between the sets, this will identify any naming differences and prevent loss of our data.
+```{r, results="hide"}
+Youtube_not_matched <- setdiff(youtube_stats$Country, median_gdp$Country)
+GDP_not_matched <- setdiff(median_gdp$Country, youtube_stats$Country)
+
+cat("Countries in youtube_stats but not in most_recent_data:\n")
+print(Youtube_not_matched)
+
+cat("\nCountries in most_recent_data but not in youtube_stats:\n")
+print(GDP_not_matched)
+```
+
+As we came see the most recent df has a multitude of unmatched values however, the YouTube stats data frame is missing five countries, however by looking through the list we can see are the same countries with different spelling or formatting. As a result we will adjust these names for a more efficient merge.
+
+```{r}
+# Mapping between country names in youtube_stats and most_recent_data
+country_mapping <- data.frame(
+  youtube_stats = c("South Korea", "Turkey", "Venezuela", "Egypt", "Russia"),
+  median_gdp = c("Korea, Rep.", "Turkiye", "Venezuela, RB", "Egypt, Arab Rep.", "Russian Federation")
+)
+
+# Convert the Country column to character
+youtube_stats$Country <- as.character(youtube_stats$Country)
+
+# Standardize the country names in youtube_stats based on the mapping
+for (i in 1:nrow(country_mapping)) {
+  youtube_stats$Country[youtube_stats$Country == country_mapping$youtube_stats[i]] <- country_mapping$median_gdp[i]
+}
+
+#Convert back 
+youtube_stats$Country <- as.factor(youtube_stats$Country)
+
+```
+
+## Merging our datasets 
+
+```{r}
+result <- left_join(youtube_stats, median_gdp)
+# Due to the merging method some countries have been retained despite 0 counts.
+
+# Get the count of each country in the  data frame
+value_count <- table(result$Country)
+
+# Get the levels (unique values) of the Country factor
+country_levels <- levels(result$Country)
+
+# Get the levels that have a count of 0
+countries_to_remove <- country_levels[value_count == 0]
+
+# Convert the Country factor to character temporarily for subsetting
+result$Country <- as.character(result$Country)
+
+# Remove rows where the Country column is in countries_to_remove
+result <- result[!(result$Country %in% countries_to_remove), ]
+
+# Convert the Country column back to a factor if needed
+result$Country <- as.factor(result$Country)
+
+result[, "Year"] <- NULL 
+
+head(result)
+```
+
+We are employing a left join because it ensures that all records from the YouTube dataset are retained. Our objective is to conduct a comprehensive analysis of the data from the left dataset while incorporating any matching data from the right dataset (world bank). This approach allows us to maintain a more complete dataset, preventing the loss of potentially relevant information. The datasets are merged based on the 'Country' column, serving as a common identifier.
+
+Furthermore, since the YouTube dataset is based on 2023 statistics, we have gathered the most recent GDP collection year from each country to merge it into the dataset, ensuring that we provide the most up-to-date economic data. We are retaining the 'Year' column to showcase differences in GDP over time.
+
+```{r}
+count_missing <- function(df) {
+  sapply(df, FUN = function(col) sum(is.na(col)) )
+}
+
+nacounts <- count_missing(result)
+hasNA = which(nacounts > 0)
+nacounts[hasNA]
+```
+As we can see from the above, GDP has 122 missing values, this would correspond to the Unknown masking variable (as its not a corresponding country), this will be dealt with below. Firstly, lets we the distribution of the dataframe.
+
+
+```{r, warning=FALSE}
+ggplot(filter(result), aes(Median_GDP)) +                       
+    geom_density(fill="blue", alpha=0.5) +
+    geom_vline(aes(xintercept=median(Median_GDP, na.rm=T)), colour='darkblue', linetype='dashed', size=2) +
+    geom_vline(aes(xintercept=mean(Median_GDP, na.rm=T)), colour='red', linetype='dashed', size=2) +
+    ggtitle("GDP Distribution") +
+    theme_bw() +
+    theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+We will use the calculated median to input invaild data to ensure no NA valiues remain.
+```{r}
+result <- result %>%
+    mutate(Median_GDP = ifelse(Median_GDP == 0 | is.na(Median_GDP), median(Median_GDP, na.rm = TRUE), Median_GDP))
+result$Median_GDP <- log(result$Median_GDP)
+
+```
+
+## Feature Engineering:
+
+The main objective of machine learning is to extract patterns to turn data into knowledge for decision making. In our case we are developing a model to help future YouTubers retain significant earnings. However, before applying any machine learning algorithm, it is necessary to transform our raw data sources into a meaningful feature that represent earnings. Hence based on domain expertise we will create a feature to boost the performance of the machine learning algorithm. 
+
+As mentioned previous we are aiming to use a target variable suitable for a classification task, so below we will normalise earnings by GDP. By feature engineering this way we can captures how significant a YouTubers earnings are compared to the average economic activity in their country. In high-GDP countries, higher earnings might be needed to be considered "high income," while in lower-GDP countries, lower earnings might still represent "high income" in the country GDP context.
+
+```{r}
+result <- result %>%
+    mutate(Scaled_Earnings_By_GDP = (highest_yearly_earnings / Median_GDP)) 
+
+summary(result$Scaled_Earnings_By_GDP)
+```
+
+Now based of the new scaled data lets split it down the middle to define low vs high income earners.
+```{r}
+median_value <- median(result$Scaled_Earnings_By_GDP, na.rm = TRUE)
+
+# Create a new variable "Income_Group" based on the median split
+result$Income_Group <- cut(result$Scaled_Earnings_By_GDP,
+                           breaks = c(-Inf, median_value, Inf),
+                           labels = c(0, 1), # 0 means low and 1 means high 
+                           include.lowest = TRUE)
+
+# Summary of the Income_Group variable
+summary(result$Income_Group)
+
+results <- result[, -which(names(result) %in% c("Scaled_Earnings_By_GDP", "Median_GDP", "highest_yearly_earnings"))]
+
+
+```
+Here we can see a almost equal split which we be useful in our Machine Learning models below! 
+
+# Vtreat for classification
+Now that data is cleaned we will train and treat our data through vtreat as it simplifies and streamlines the data preparation process for machine learning, reducing the risk of data leakage and ensure that our data is properly pre-processed and ready for modeling. Moreover, it is valuable when working with categorical variables, as it automatically converts them to numeric values without additional pre-processing.
+
+```{r, message=FALSE}
+# load packages
+library(Information)
+library(rsample)
+library(caret)
+library(tidyselect)
+library(vtreat)
+library(stringr)
+set.seed(729375)
+rgroup <- base::sample(c('train', 'calibrate', 'test'),
+   nrow(results),
+   prob = c(0.8, 0.1, 0.1),
+   replace = TRUE)
+dTrain <- results[rgroup == 'train', , drop = FALSE]
+dCal <- results[rgroup == 'calibrate', , drop = FALSE]
+dTrainAll <- results[rgroup %in% c('train', 'calibrate'), , drop = FALSE]
+dTest <- results[rgroup == 'test', , drop = FALSE]
+
+outcome <- 'Income_Group'
+vars <- setdiff(colnames(dTrainAll), outcome)
+
+
+outcome_summary <- table(
+   Income_Group = dTrain[, outcome])
+
+knitr::kable(outcome_summary)
+
+
+outcome_summary["1"] / sum(outcome_summary)
+```
+Our value of 50.94% shows the proportion of the "Income_Group" variable within the training dataset (dTrain) belong our high income earners labeled as "1". With a ~0.5 proportion suggesting a relatively balanced distribution. 
+
+```{r}
+(parallel_cluster <- parallel::makeCluster(parallel::detectCores()))
+
+treatment_plan <- vtreat::designTreatmentsC(
+  dTrain,
+  varlist = vars,
+  outcomename = "Income_Group",
+  outcometarget = 1,
+  verbose = FALSE,
+  parallelCluster = parallel_cluster)
+```
+
+The above code is setting up parallel processing to accelerate the variable treatment process performed by the vtreat package. 
+```{r, warning=FALSE}
+dTrain_treated <- prepare(treatment_plan,
+                          dTrain,
+                          parallelCluster = parallel_cluster)
+
+head(colnames(dTrain))
+
+head(colnames(dTrain_treated))
+
+
+
+```
+
+The above treatment_plan is used on the dTrain dataset using the prepare() function. Afterward, it checks and displays the column names of both the original dTrain dataset and the treated dTrain_treated dataset. This allows us to compare the column names before and after variable treatment to see how the treatment process has modified or added columns to the dataset. Here we can see that categorical variables like "category" and "Country" have been transformed into binary indicators to make them suitable for machine learning algorithms that require numeric input.
+
+```{r}
+score_frame <-  treatment_plan$scoreFrame
+kable(t(score_frame))
+
+```
+
+```{r}
+comparison <- data.frame(original = dTrain$category,
+                          impact = dTrain_treated$category_catB)
+ 
+ head(comparison)
+
+ 
+ Country_comparison <- data.frame(original = dTrain$Country,
+                          impact = dTrain_treated$Country_catB)
+ 
+ head(Country_comparison)
+ 
+channel_comparison <- data.frame(original = dTrain$channel_type,
+                          impact = dTrain_treated$channel_type_catB)
+ 
+ head(channel_comparison)
+
+```
+
+As we can see from the tables above the catB encoding returns a single new variable, with a numerical value for every possible level of the original categorical variable. This value represents how informative a given level is: values with large magnitudes correspond to more-informative levels. As we can see certain countries like India have a larger impact.
+
+```{r}
+
+dCalt <- prepare(treatment_plan,
+                        dCal,
+                        parallelCluster = parallel_cluster)
+# remove unequal country (imbalanced dataset causing this)
+# Remove the column by column name
+dCalt <- dCalt[, !colnames(dCalt) %in% "Country_lev_x_Korea_comma_Rep_"]
+
+Fresh_dcal <- dCalt
+
+
+library("vtreat")
+
+parallel_cluster <- parallel::makeCluster(parallel::detectCores())
+
+cross_frame_experiment <- vtreat::mkCrossFrameCExperiment(
+  dTrainAll,
+  varlist = vars,
+  outcomename = "Income_Group",
+  outcometarget = 1,
+  verbose = FALSE,
+  parallelCluster = parallel_cluster)
+
+dTrainAll_treated <- cross_frame_experiment$crossFrame
+treatment_plan <- cross_frame_experiment$treatments
+#score_frame <- treatment_plan$scoreFrame
+
+dTest_treated <- prepare(treatment_plan,
+                         dTest,
+                         parallelCluster = parallel_cluster)
+
+#treated out put use this for model 
+
+
+head(dTest_treated)
+head(dTrainAll_treated)
+
+# these variables are backup as iteration over the dataframe and log analysis may append additional information
+Fresh_dTest <- dTest_treated
+Fresh_dTrain_treated <- dTrainAll_treated
+
+
+bost_dTest <- dTest_treated
+bost_dTrain_treated <- dTrainAll_treated
+bost_cal <- dCalt
+```
+
+Note: "catB" stands for "categorical to binary." and "catP" stands for "categorical to probability." 
+
+Using the same treatment plan on both datasets, we can ensure that the data used for model training and testing is prepared in a consistent and unbiased manner. Now we have treated test and trained data to feature select from and build our models with. 
+
+```{r}
+logLikelihood <- function(ypred, ytrue) {
+  sum(ifelse(ytrue, log(ypred), log(1-ypred)), na.rm=T)
+}
+outcome = "Income_Group"
+pos = 1 
+logNull <- logLikelihood(sum(dCalt[,outcome]==pos)/nrow(dCalt), dCalt[,outcome]==pos)
+print(logNull)
+```
+above we've calculated a null log-likelihood based, with the null model having a value of  approximately -68.37389. We will uses this value as a reference point for evaluating the performance of more complex models. For example, if the log-likelihood of our actual model is significantly higher than the null log-likelihood, it suggests that the model is providing better predictions.
+
+## Data Exploration 
+```{r}
+library(corrplot)
+
+# Calculate the correlation matrix for the first 41 variables
+cormat <- cor(dTrainAll_treated[, 1:41])
+
+# Reduce text size to hide the number labels
+corrplot(cormat, method = 'shade', type = 'full', tl.cex = 0.35)  # Setting tl.cex to 0 hides the numbers
+
+
+
+```
+
+Strong relations seem to only emerge around vTreat categorical to numerical factors.
+
+
+```{r}
+
+# The functions below were adapted from CITS_4009 lab material.
+
+# Function to make probabilistic predictions based on categorical variables
+mkPredC  <- function(outcomeColumn, variableColumn, applicationColumn, positiveLabel = pos.label) {
+  # Calculate the proportion of positive labels in the outcome column
+  pPositive <- sum(outcomeColumn == positiveLabel) / length(outcomeColumn)
+  
+  # Create a contingency table for missing values
+  naTable <- table(as.factor(outcomeColumn[is.na(variableColumn)]))
+  
+  # Calculate the conditional probability of a positive label given missing values
+  pPositiveWithNA <- (naTable / sum(naTable))[positiveLabel]
+  
+  # Create a contingency table for the given outcome and variable columns
+  variableTable <- table(as.factor(outcomeColumn), variableColumn)
+  
+  # Calculate the conditional probability of a positive label given the variable values
+  pPositiveWithVariable <- (variableTable[positiveLabel, ] + 1.0e-3 * pPositive) / (colSums(variableTable) + 1.0e-3)
+  
+  # Make predictions based on the application column
+  predictions <- pPositiveWithVariable[applicationColumn]
+  
+  # Handle missing values in the application column
+  predictions[is.na(applicationColumn)] <- pPositiveWithNA
+  
+  # Handle any remaining missing predictions
+  predictions[is.na(predictions)] <- pPositive
+  
+  return(predictions)
+}
+
+# Function to make probabilistic predictions based on numeric variables
+mkPredN <- function(outcomeColumn, variableColumn, applicationColumn) {
+  # Define quantile cuts for the numeric variable
+  cuts <- unique(as.numeric(quantile(variableColumn, probs = seq(0, 1, 0.1), na.rm = TRUE)))
+  
+  # Create categorical representations of the variable and application columns
+  variableCuts <- cut(variableColumn, cuts)
+  applicationCuts <- cut(applicationColumn, cuts)
+  
+  # Use the previous function to make predictions based on categorical representations
+  predictions <- mkPredC(outcomeColumn, variableCuts, applicationCuts)
+  
+  return(predictions)
+}
+
+
+calcAUC <- function(predictionColumn, outcomeColumn, positiveLabel = pos.label) {
+  # Create a performance object to calculate AUC
+  performanceObj <- performance(prediction(predictionColumn, outcomeColumn == positiveLabel), 'auc')
+  
+  # Extract the AUC values as numeric
+  aucValues <- as.numeric(performanceObj@y.values)
+  
+  return(aucValues)
+}
+
+
+outcome <- "Income_Group"
+pos.label <- "1"
+
+# Create an empty data frame to store the results
+results_df <- data.frame(
+  ModelType = character(0),
+  TrainAUC = numeric(0),
+  CalibrationAUC = numeric(0)
+)
+
+pii <- NULL
+
+
+# Now, use mkPredN with  numeric variables
+for (v in names(dTrainAll_treated)) {  # Loop through column names
+  if (v == outcome) {
+    next  # Skip the outcome variable
+  }
+  pii <- paste('pred', v, sep = '')
+  dTrainAll_treated[, pii] <- mkPredN(dTrainAll_treated$Income_Group, dTrainAll_treated[, v], dTrainAll_treated[, v])
+  dTest_treated[, pii] <- mkPredN(dTrainAll_treated$Income_Group, dTrainAll_treated[, v], dTest_treated[, v])
+  dCalt[, pii] <- mkPredN(dTrainAll_treated$Income_Group, dTrainAll_treated[, v], dCalt[, v])
+  aucTrain <- calcAUC(dTrainAll_treated[, pii], dTrainAll_treated$Income_Group)
+
+  if (aucTrain >= 0.5) {
+    aucCal <- calcAUC(dCalt[, pii], dCalt[, outcome])
+    model_type <- paste(v, "trainAUC:", aucTrain, "calibrationAUC:", aucCal)
+    
+    # Add the results to the data frame
+    results_df <- rbind(results_df, data.frame(ModelType = model_type, TrainAUC = aucTrain, CalibrationAUC = aucCal))
+  }
+}
+# Sort the data frame by CalibrationAUC in descending order
+results_df <- results_df %>% arrange(desc(CalibrationAUC))
+
+# Print the sorted results table using kable
+kable(results_df)
+
+
+
+
+
+```
+As our target variable is "Income_Group" in the context of YouTube statistics and how to be a high income earner. The univariate models can have various implications, for businesses and people looking to join that platform. The top three features by CalibrationAUC: reveal that Country_catB has a CalibrationAUC of 0.9276046, this could indicate that audience segmentation could be an area to focus on, as audiences in some countries may generate more income revenue. Gross_tertiary_education_enrollment_ was another contributing factor, this could indicate that higher education levels of a specific country could map to higher earnings (this perhaps should be explore within a country context). Population was the third highest scored variable and should be considered like education, inline with a specific country. Overall our top variables are highlighting that the country is the largest contributor to higher income earners.  
+
+
+## Feature Selection Log-likelihood
+
+Before creating a Multivariate  prediction model based on YouTube and GDP data we first have to deal with the so-called “curse of dimensionality” (i.e., extensively larger number of features compared to the number of samples). Therefore, for the sake of generaliability in our machine learning models  will will engage in feature selection, which aims to extract only the most “informative” features and remove noisy “non-informative,” irrelevant and redundant features. Feature selection will only be done on the training data. The reason for this is to prevent data leakage, where information from the test set inadvertently influences the feature selection process (Shim et al., 2021).
+
+As our first technique we will be using, Log-likelihood as it comes from Maximum Likelihood Estimation, a technique for finding or optimizing the parameters of a model in response to a training dataset.
+
+```{r}
+selPredVars <- c()
+selVars <- c()
+minStep <- 10
+
+# Define a function to calculate the log-likelihood
+calculateLogLikelihood <- function(outcome, prediction, pos = pos.label) {
+  sum(ifelse(outcome == pos, log(prediction), log(1 - prediction)))
+}
+
+# Calculate the base rate log-likelihood for the outcome variable
+baseRateCheck <- calculateLogLikelihood(dCalt[, outcome], sum(dCalt[, outcome] == pos.label) / length(dCalt[, outcome]))
+
+# Loop through all variables in the dataset
+for (variableName in names(dCalt)) {
+  # Skip the outcome variable
+  if (variableName == outcome) {
+    next  # Skip to the next iteration
+  }
+
+  # Check if the variable name contains "pred"
+  if (grepl("pred", variableName)) {
+    # Calculate the log-likelihood ratio
+    logLikelihoodCheck <- 2 * ((calculateLogLikelihood(dCalt[, outcome], dCalt[, variableName]) - baseRateCheck) - 1)
+
+    # Check if the log-likelihood ratio meets the minimum step threshold
+    if (logLikelihoodCheck >= minStep) {
+      # Print the variable name and its calibration score
+      print(sprintf("%s, calibrationScore: %g", variableName, logLikelihoodCheck))
+
+      # Store the selected predictor variables and their base names
+      selPredVars <- c(selPredVars, variableName)
+      selVars <- c(selVars, sub("^pred", "", variableName))
+    }
+  }
+}
+
+# Print the total number of selected variables
+print(sprintf("%d variables selected", length(selVars))) 
+```
+
+Using the log likelihood we have been able to select 9 variables for a model.
+
+## Feature Selection Boruta
+Feature selection methods can produce different results, to counter this we will use the Boruta algorithm for feature selection which is a wrapper algorithm around random forest. The main idea of this approach is to compare the importance of the actual predictor variables with those of random "shadow variables", which prepares conditional variables corresponding to features for a prediction model based on rough set theory (RST) (Degenhardt et al., 2019; Szul et al., 2021).Variables with significantly larger or smaller importance values are declared important or unimportant. All unimportant and shadow variables are removed, and the previous steps are repeated until all variables are classified (Degenhardt et al., 2019). We will conduct it on both test and training data. This is a highly computational technique.
+
+```{r, message=FALSE}
+set.seed(12345)
+# Load necessary libraries
+library(Boruta)
+library(vtreat)
+
+# Specify your target variable and predictors
+target_variable <- "Income_Group"
+
+# Create a formula for the Boruta analysis
+boruta_formula <- as.formula(paste(target_variable, "~ ."))
+
+# Perform Boruta feature selection
+boruta_output <- Boruta(boruta_formula, data = Fresh_dTrain_treated, doTrace = 2)
+
+# Print significant variables (Confirmed and Tentative)
+boruta_signif <- names(boruta_output$finalDecision[boruta_output$finalDecision %in% c("Confirmed", "Tentative")])
+print(boruta_signif)
+```
+The Boruta package has run through multiple iteration to select the above variables, these will be ustilising in our model.
+```{r}
+# Plot variable importance
+plot(boruta_output, cex.axis = 0.7, las = 2, xlab = "", main = "Variable Importance")
+```
+
+The above graph showcases the levels of importance for each variable, as we can see country is a major factor to consider, this also aligns with our log-likelihood feature selection model which also had country as the largest factor.
+
+
+```{r}
+
+# The below function is adapted from project2 CITS_4009 sample report
+
+evaluate_performance <- function(predictions, true.values, do.print=TRUE, threshold.value=0.5, pos=pos.label){
+  eval.auc <- calcAUC(predictions, true.values)
+  
+  if(do.print){
+    # ROC plot
+    predObj <- prediction(predictions, true.values)
+    perf <- performance(predObj, "tpr", "fpr")
+    roc.df <- data.frame('fpr'=unlist(perf@x.values),
+                   'tpr'=unlist(perf@y.values),
+                   'threshold'=unlist(perf@alpha.values))
+    
+    p <- ggplot(roc.df, aes(x=fpr, y=tpr))+
+      geom_line() +
+      geom_abline(intercept = 0, slope = 1, linetype='dashed')  +
+      labs(x = "False Positive Rate (FPR)", y = "True Positive Rate (TPR)") +
+      ggtitle("ROC Curve")
+     
+    print(p)
+    
+    
+    # prediction distribution plot
+    p <- ggplot(data.frame(predictions=predictions,  true.values=true.values),
+          aes(x=predictions, color=true.values, linetype=true.values)) +
+          geom_density()  + 
+          labs(y = "True Positive Rate", x = "False Positive Rate") 
+          
+    
+    print(p)
+    
+    # precision/recall plot
+    precObj <- performance(predObj, measure="prec")
+    recObj <- performance(predObj, measure="rec")
+    precision <- (precObj@y.values)[[1]]
+    prec.x <- (precObj@x.values)[[1]]
+    recall <- (recObj@y.values)[[1]]
+    f1_score <- 2 * precision * recall / (precision + recall)
+    rocFrame <- data.frame(threshold=prec.x,
+                           precision=precision,
+                           recall=recall,
+                           f1_score=f1_score)
+    
+    pnull <-mean(true.values==pos)
+    
+    p1 <- ggplot(rocFrame, aes(x=threshold)) +
+    geom_line(aes(y=precision)) +
+    coord_cartesian(xlim = c(0,1), ylim=c(0,1) )  
+    p2 <- ggplot(rocFrame, aes(x=threshold)) +
+    geom_line(aes(y=recall)) +
+    coord_cartesian(xlim = c(0,1) ) 
+    grid.arrange(p1, p2, nrow = 2)
+  
+    # Confusion matrix table
+    cat('Confusion Matrix')
+    ctab.test <- table(pred=predictions > threshold.value, true.values=true.values)
+    print(kable(ctab.test))
+    
+    # Log likelihood
+    pNull <- mean(true.values==pos.label)
+    model.ll <- sum(ifelse(true.values==pos.label, log(predictions), log(1-predictions)))
+    null.model.ll <- sum(ifelse(true.values==pos.label, log(pNull), log(1-pNull)))
+    print(paste('Model Log Likelihood:', model.ll))
+    print(paste('Null Model Log Likelihood:', null.model.ll))
+    
+  }
+  
+  eval.auc
+}
+
+evaluate_and_log_model <- function(model, name, predictionsTrain, trueValues, predictionsCal, truevaluesCal){
+  train_auc <- evaluate_performance(predictionsTrain, trueValues, do.print = FALSE)
+  cal_auc <- evaluate_performance(predictionsCal, truevaluesCal, do.print = TRUE)
+  result <- data.frame(model = model,
+                         name = name,
+                         train_auc = train_auc,
+                         cal_auc = cal_auc)
+  rownames(result) <- name
+  result
+}
+```
+
+```{r}
+calcAUC <- function(predcol, outcol, pos=pos.label) {
+  perf <- performance(prediction(predcol, outcol==pos),'auc')
+  as.numeric(perf@y.values)
+}
+
+performanceMeasures <- function(pred, truth, name = "model") {
+   ctable <- table(truth = truth, pred = (pred > 0.5))
+   accuracy <- sum(diag(ctable)) / sum(ctable)
+   precision <- ctable[2, 2] / sum(ctable[, 2])
+   recall <- ctable[2, 2] / sum(ctable[2, ])
+   f1 <- 2 * precision * recall / (precision + recall)
+   data.frame(model = name, precision = precision,
+              recall = recall,
+              f1 = f1, accuracy = accuracy)
+}
+
+pretty_perf_table <- function(model,training,test) {
+  library(pander)
+  # setting up Pander Options
+  panderOptions("plain.ascii", TRUE)
+  panderOptions("keep.trailing.zeros", TRUE)
+  panderOptions("table.style", "simple")
+  perf_justify <- "lrrrr"
+  # comparing performance on training vs. test
+  pred_train <- predict(model, newdata=training)
+  truth_train <- Fresh_dTrain_treated[, "Income_Group"]
+  pred_test <- predict(model, newdata=test)
+  truth_test <- Fresh_dTest[, "Income_Group"]
+  trainperf_tree <- performanceMeasures(
+      pred_train, truth_train, "logistic, training")
+  testperf_tree <- performanceMeasures(
+      pred_test, truth_test, "logistic, test")
+  perftable <- rbind(trainperf_tree, testperf_tree)
+  pandoc.table(perftable, justify = perf_justify)
+}
+
+ 
+pos.label <- "1"
+outcome = "Income_Group"
+```
+
+
+## 2 X Classifiers: Decision Tree & Logistic Regression
+
+We are going to use respond variables to predict or classify target variable("Income_Group") is located at which group (high or low). Then evaluate its accuracy, and other related model indicators. 
+
+```{r}
+fV <- paste(outcome,' ~ ', paste(c(selVars), collapse=' + '), sep='')
+
+decision_t_selVar <- rpart(fV, data=Fresh_dTrain_treated)
+
+evaluate_and_log_model(model = 'multivariate',
+                       name = 'decision_t_selVar',
+                       predictionsTrain = predict(decision_t_selVar, newdata=Fresh_dTrain_treated)[,pos.label],
+                       trueValues = Fresh_dTrain_treated[,outcome],
+                       predictionsCal = predict(decision_t_selVar, newdata=Fresh_dcal)[,pos.label],
+                       truevaluesCal = Fresh_dcal[,outcome])
+rpart.plot(decision_t_selVar)
+prp(decision_t_selVar)
+```
+
+The 'decision_t_selVar' decision tree model, which uses a multivariate approach, demonstrates strong predictive performance, as shown by its high AUC scores. The training AUC of 0.8911943 showing the model's ability to effectively distinguish between various income groups within the training dataset. The calibration AUC of 0.923913 indicates that the model's predictions align well with the actual outcomes (high income) after calibration. However, visually examining the decision tree's structure, it becomes apparent that the primary factor influencing income prediction is the 'country type.' This aligns with our univariate analysis, where country-related variables emerged as the most influential. Decision trees are robust models capable of handling untransformed data, thanks to their ability to perform data splits. This suggests that 'country type' plays a the sole role in determining an individual's income, as indicated by log-likelihood selection.
+
+
+Moroever, the precision graph quantifies the accuracy of positive predictions made by the model, indicating how many of the instances labeled as positive are genuinely positive. Recall, on the other hand, measures the model's ability to capture all true positive instances, revealing how well it avoids missing positive cases. Through visualisation we can see precision is steadly rising, however recall is experiencing a signifcant drop.
+
+Lastly, the model's log likelihood of approximately -24.01(2dp) indicates a significantly better fit to the data compared to the null model's log likelihood of approximately -68.37(2dp).
+
+```{r}
+dt_model <- paste(outcome,' ~ ', paste(c(boruta_signif), collapse=' + '), sep='')
+DecsionTree_Boruta <-  rpart(dt_model, data=Fresh_dTrain_treated)
+
+evaluate_and_log_model(model = 'multivariate',
+                       name = 'DecsionTree_Boruta',
+                       predictionsTrain = predict(DecsionTree_Boruta, newdata=Fresh_dTrain_treated)[,pos.label],
+                       trueValues = Fresh_dTrain_treated[,outcome],
+                       predictionsCal = predict(DecsionTree_Boruta, newdata=Fresh_dcal)[,pos.label],
+                       truevaluesCal = Fresh_dcal[,outcome])
+
+rpart.plot(DecsionTree_Boruta)
+prp(DecsionTree_Boruta)
+```
+
+For or other decision tree model, it can be deduced that the Boruta algorithm offered better accuracy and could identify high income earners better as the "DecisionTree_Boruta" model, achieves higher AUC scores, with a training AUC of  0.927 and a calibration AUC of 0.969. Moreover, by examining the tree plot we can see that their are 4 major factors that are contributing to the model, interestingly this model contains so features that did not score a significantly large AUC in the univariate analysis such as created_year, and video_views, this provides evidence that a multitude of variable (multivariate) model is perhaps better at predicting income group. 
+
+Moreover, this model also produced a better log likelihood result of -15.89(2pd), suggesting its not only better than the null but the selVar decision tree. Precision and recall, seem to follower a similar trend to the previous model however it takes longer for recall to drop.
+
+
+
+# Logistic Regression Classifier with selected features 1 and 2
+```{r}
+Log_lin <- paste(outcome,' ~ ',  paste(selVars, collapse=' + '), sep='')
+
+logreg_selVars <- glm(Log_lin, data=Fresh_dTrain_treated, family = binomial)
+
+evaluate_and_log_model(model = 'multivariate',
+                       name = 'logreg_selVars',
+                       predictionsTrain = predict(logreg_selVars, newdata=Fresh_dTrain_treated, type = 'response'),
+                       trueValues = Fresh_dTrain_treated[,outcome],
+                       predictionsCal = predict(logreg_selVars, newdata=Fresh_dcal, type = 'response'),
+                       truevaluesCal = Fresh_dcal[,outcome])
+```
+
+
+```{r}
+Fresh_dTrain_treated$pred <- predict(logreg_selVars, newdata=bost_dTrain_treated, type="response")
+Fresh_dTest$pred <- predict(logreg_selVars, newdata=bost_dTest, type="response")
+
+pretty_perf_table(logreg_selVars, Fresh_dTrain_treated, Fresh_dTest)
+```
+In the "logreg_selVars" logistic regression model,the model delivers strong predictive performance with a training AUC of 0.930 and a calibration AUC of around 0.964.  In the test dataset, the model achieves perfect precision, indicating that all positive predictions are correct (potential, overfitting indicator). The high recall and F1 score on the test dataset also reflect the model's strong ability to correctly classify positive instances (high income).
+
+Despite its AUC and perfect precision the model has a log likelihood of -22.02(2dp), while better than the null model still produces a worse fit compared to the boruta feature decision tree.
+
+```{r}
+dt_model <- paste(outcome, ' ~ ', paste(c(boruta_signif), collapse=' + '), sep='')
+
+# Fit the logistic regression model
+Logreg_boruta <- glm(dt_model, data = bost_dTrain_treated, family = binomial)
+
+# Call the evaluate_and_log_model function
+evaluate_and_log_model(model = 'multivariate',
+                       name = 'Logreg_boruta',
+                       predictionsTrain = predict(Logreg_boruta, newdata=bost_dTrain_treated, type = 'response'),
+                       trueValues = bost_dTrain_treated[,outcome],
+                       predictionsCal = predict(Logreg_boruta, newdata=bost_cal, type = 'response'),
+                       truevaluesCal = bost_cal[,outcome])
+```
+
+```{r}
+Fresh_dTrain_treated$predB <- predict(Logreg_boruta, newdata=bost_dTrain_treated, type="response")
+Fresh_dTest$predB <- predict(Logreg_boruta, newdata=bost_dTest, type="response")
+
+pretty_perf_table(Logreg_boruta, Fresh_dTrain_treated, Fresh_dTest)
+
+```
+The evaluation of the logistic regression model "Logreg_boruta" reveals a 0.9713336 traning AUC and a	0.97867 calibration AUC. On the training dataset, the model achieves a high precision of 0.9726, indicating that a significant proportion of its positive predictions are correct, alongside an accuracy of approximately 0.9196. The model's recall of 0.8650 on the training data reflects its ability to capture true positives, resulting in an higher F1 score of 0.9157. The test dataset, has a precision of about 0.9286 and a recall of approximately 0.8667, contributing to an F1 score of around 0.8966 and an accuracy of 0.9091. This model has produced better results than the previous log model but it still has a lower log likelihood than the decision tree, with a -17.93(2dp). 
+
+
+## Xgboost Models 
+
+Here we will be using xgBoost with the LIME model to explain our results by presenting representative individual predictions and their explanations (Ribeiro et al., 2016).
+
+```{r}
+library(xgboost)
+set.seed(222)
+Fit_data = function(variable_matrix, labelvec) {
+  cv <- xgb.cv(variable_matrix, label = labelvec,
+               params=list(
+                 objective="binary:logistic"
+               ),
+               nfold=5,
+               nrounds=100,
+               print_every_n=10,
+               metrics="logloss")
+
+  evalframe <- as.data.frame(cv$evaluation_log)
+  NROUNDS <- which.min(evalframe$test_logloss_mean)
+
+  model <- xgboost::xgboost(data=variable_matrix, label=labelvec,
+                   params=list(
+                     objective="binary:logistic"
+                   ),
+                   nrounds=NROUNDS,
+                   verbose=FALSE)
+
+  model
+}
+
+```
+
+```{r}
+bost_dTrain_treated$Income_Group <- as.numeric(as.character(bost_dTrain_treated$Income_Group))
+
+# Invert the labels (0 becomes 1, and 1 becomes 0)
+# 1 is now low nd 0 is high
+label <- 1 - bost_dTrain_treated$Income_Group
+
+input <- as.matrix(bost_dTrain_treated[boruta_signif])
+model <- Fit_data(input, label)
+
+input_test <- as.matrix(bost_dTest[boruta_signif])
+
+# Predict probabilities with the model
+ypred <- predict(model, newdata = input, type = "response")
+
+# Calculate log-likelihood using function
+logLikelihood(ypred, label)
+
+```
+
+```{r, message=FALSE}
+library(lime)
+explainer <- lime(bost_dTrain_treated[boruta_signif], model = model, 
+                  bin_continuous = TRUE, n_bins = 10)
+```
+```{r}
+par(mar = c(5, 5, 6, 4))  # Values in c(bottom, left, top, right)
+cases <- c(91)
+(example <- bost_dTest[cases,boruta_signif])
+
+explanation <- lime::explain(example, explainer, n_labels = 1, n_features = 21)
+plot_features(explanation)
+
+```
+
+Consistent to our previous models, country stays the key variable to income group, however in terms of fix the decision tree has a high log likelihood, interesting with this we can see what variables are contributing a negative weight. 
+
+The LIME analysis on the YouTube statistics dataset (boruta) with a focus on predicting income group provides valuable insights into the factors that influence the classification of instances. In this particular instance, we observe a combination of feature values that can sway the income group classification.
+
+For instance, the relatively low number of uploads suggests that content production might not be substantial for income. On the other hand, the positive value of Country_catP indicates an affiliation with a particular country or category. This could imply that the channel's content is more aligned with the interests or themes prevalent in that specific region or category.
+
+Conversely, the negative value of Country_catB suggests a disassociation from another category or region. This means that the channel is less likely to be associated with certain categories or countries.
+
+Additionally, the high gross tertiary education enrollment rate and the substantial population size are have a noteworthy weight. A high unemployment rate also plays a role in the classification. This demonstrates that socio-economic factors might influence the income group predictions, especially when considering the income disparities in different regions.
+
+
+```{r}
+label <- 1 - bost_dTrain_treated$Income_Group
+
+input_sel <- as.matrix(bost_dTrain_treated[selVars])
+model_sel <- Fit_data(input_sel, label)
+
+# Predict probabilities with the model
+ypred_sel <- predict(model_sel, newdata = input_sel, type = "response")
+
+# Calculate log-likelihood using function
+logLikelihood(ypred_sel, label)
+
+```
+
+```{r, message=FALSE}
+explainer <- lime(bost_dTrain_treated[selVars], model = model_sel, 
+                  bin_continuous = TRUE, n_bins = 10)
+cases <- c(91)
+(example <- bost_dTest[cases,selVars])
+
+explanation <- lime::explain(example, explainer, n_labels = 1, n_features = 9)
+plot_features(explanation)
+
+```
+
+LIME's analysis reveals thw weighting of our variables with the goal of predicting high-income earners. The relatively low number of uploads suggests limited content production for high income earners, while the positive Country_catP value indicates an affiliation with a specific country. Whereas, the negative Country_catB value suggests a disassociation from another Country. The high gross tertiary education enrollment rate likely reflects the educational context of the country under consideration. The substantial population size could signify a broader why a content creator is a high income earner, and the high unemployment rate might significantly impact the classification. 
+
+However, log-likeihood reveals that neither of the models are the best at predicting income with a log of -85.19424 and -143.3241.
+
+
+Overall, on the basis of log model comparison DecsionTree_Boruta produced the best model outcome
+```{r}
+evaluate_performance(
+  predict(DecsionTree_Boruta, newdata = bost_dTest)[, 2],  # Use the second column for positive class predictions
+  true.values = bost_dTest[, outcome],
+  do.print = TRUE,
+  threshold.value = 0.5,
+  pos = pos.label
+)
+
+
+```
+
+The ‘DecsionTree_Boruta’ model has a log likelihood of -29.4307623882536, is significantly different from out Null model’s -68.2119146091892. With an AUC of 0.91 (2.dp) for the testing data which is less than the training data and calibration, which it scored ~0.97(2dp). The ROC curve of this model looks smaller than our training data perhaps due to the size differences, still however shows a significant prediction between high and low earners. 
+
+
+## Clustering
+
+```{r}
+set.seed(1680)
+
+# Load necessary libraries
+library(cluster)  # For Gower similarity and PAM
+library(Rtsne)  # For t-SNE plot
+
+# Introduction:
+# In data clustering, Euclidean distance is a popular choice. However, it's only valid for continuous variables.
+# We need a distance metric that can handle mixed data types, so we're using Gower distance.
+
+# Calculate Gower distance for the dataset
+gower_dist <- daisy(results, metric = "gower")
+summary(gower_dist)
+
+```
+
+```{r}
+gower_mat <- as.matrix(gower_dist)
+
+# Output most similar pair
+
+results[
+
+  which(gower_mat == min(gower_mat[gower_mat != min(gower_mat)]),
+
+        arr.ind = TRUE)[1, ], ]
+
+# Output most dissimilar pair
+
+results[
+
+  which(gower_mat == max(gower_mat[gower_mat != max(gower_mat)]),
+
+        arr.ind = TRUE)[1, ], ]
+
+```
+
+Now that the we've calaculated the distance matrix, our next step is to choose a clustering algorithm, and in this case, we opt for Partitioning Around Medoids (PAM). PAM is an iterative clustering method that operates as follows: First, we randomly select k entities to serve as initial medoids. Next, we assign every entity to its closest medoid using the custom distance matrix we've computed. Then, for each cluster, we examine whether reassigning the medoid to another observation would lead to a lower average distance. If it would, we make that observation the new medoid. This process continues iteratively, returning to the second step whenever at least one medoid changes, until no further changes occur. It's important to note that, in PAM, the cluster centers are constrained to be the actual data points themselves, referred to as medoids.
+
+
+We will use silhouette width, an internal validation metric which is an aggregated measure of how similar an observation is to its own cluster compared its closest neighboring cluster. The metric can range from -1 to 1, where higher values are better. After calculating silhouette width for clusters ranging from 2 to 10 for the PAM algorithm, we see that 4 clusters yields the highest value.
+
+```{r}
+# Calculate silhouette width for many k using PAM
+
+sil_width <- c(NA)
+
+for(i in 2:10){
+
+  pam_fit <- pam(gower_dist,
+
+                 diss = TRUE,
+
+                 k = i)
+
+  sil_width[i] <- pam_fit$silinfo$avg.width
+
+}
+
+# Plot sihouette width (higher is better)
+
+plot(1:10, sil_width,
+
+     xlab = "Number of clusters",
+
+     ylab = "Silhouette Width")
+
+lines(1:10, sil_width)
+
+``` 
+```{r}
+
+pam_fit <- pam(gower_dist, diss = TRUE, k = 4)
+
+pam_results <- results %>%
+
+  dplyr::select(-Income_Group) %>%
+
+  mutate(cluster = pam_fit$clustering) %>%
+
+  group_by(cluster) %>%
+
+  do(the_summary = summary(.))
+
+pam_results$the_summary
+
+```
+
+```{r}
+library("Rtsne")
+
+tsne_obj <- Rtsne(gower_dist, is_distance = TRUE)
+
+tsne_data <- tsne_obj$Y %>%
+
+  data.frame() %>%
+
+  setNames(c("X", "Y")) %>%
+
+  mutate(cluster = factor(pam_fit$clustering),
+
+         name = results$Income_Group)
+
+ggplot(aes(x = X, y = Y), data = tsne_data) +
+
+  geom_point(aes(color = cluster))
+
+```
+
+```{r}
+results[pam_fit$medoids, ]
+```
+
+
+```{r}
+# showcasing the data points within Cluster in a t-SNE (t-distributed stochastic neighbor embedding) reduced-dimensional space
+head(tsne_data[tsne_data$cluster=='1',])
+head(tsne_data[tsne_data$cluster=='2',])
+head(tsne_data[tsne_data$cluster=='3',])
+head(tsne_data[tsne_data$cluster=='4',])
+```
+
+In Cluster 1: Content creators in this cluster are likely part of the "Low Income" group. They have a moderate but number of subscribers and video views. The most prevalent category within this cluster is "Entertainment," followed by "Music" and "People & Blogs," indicating a preference for these content genres. Additionally, these YouTubers tend to upload their content moderately. The majority of entities in this cluster originate from "India," and the prevailing channel type is "Entertainment." Notably, these entities have been active over a wide span of years, with some established as early as "2005" and others as recent as "2022." It is also worth noting that Cluster 1 demonstrates relatively low average values for both "Gross tertiary education enrollment" and "Unemployment rate," suggesting that these creators might focus on entertainment and music content and have been relatively stable over the years. Overall, Cluster 1 is characterized by YouTubers primarily involved in "Entertainment" and "Music" from India, with a history spanning many years.
+
+Cluster 2: Content creators in this cluster likely belong to "High Income", with YouTubers with a moderate numbers of subscribers and video views. The main content category in this cluster is "Entertainment," followed by "Music" and "Gaming." This cluster has entities that upload their content similar to cluster 1 Interestingly, the majority of Youtubers in this cluster hail from the "United States," and the dominant channel type is "Entertainment." These YouTubers have a range of creation years, from "2005" to "2022." Moreover, Cluster 2 displays relatively high values for both "Gross tertiary education enrollment" and "Unemployment rate." This suggests that Cluster 2 is primarily characterized by entities located in the "United States" heavily involved in the "Entertainment" sector, but are lower.
+
+Cluster 3: Content creators in this cluster have diverse income group backgrounds, with some originating from "UNKNOWN" regions and others from the "United Kingdom." They have a moderate number of subscribers and video views, and the most common content categories are "People & Blogs" and "Gaming." These creators tend to produce content with a lower number of uploads. They have been active on YouTube for a range of years, from "2005" to "2022." The moderate values for "Gross tertiary education enrollment" and "Unemployment rate" indicate that these creators may come from a mix of income groups and may use YouTube as a platform for various types of content creation. This cluster represents a diverse group of content creators with varying income group backgrounds, focusing on "People & Blogs" and "Gaming."
+
+Cluster 4: Content creators in this cluster are likely associated with "High Income" groups. They have a moderate number of subscribers and video views, with the most common content categories being "Music" and "Gaming." They tend to produce content with a moderate number of uploads and are primarily based in "Brazil." These creators have been active on YouTube from "2005" to "2022." The relatively high values for "Gross tertiary education enrollment" and "Unemployment rate" suggest that these creators may come from regions with better economic opportunities and may use YouTube as a supplementary source of income. This cluster represents content creators from higher-income regions, focusing on music and gaming content, with a specific emphasis on "Brazil."
+
+
+## Cluster Euclidean
+In our above cluster we looked at both categorical and numerical values. However, we should have a look at the data from just a numerical perspective. 
+
+```{r}
+
+results_clust <- subset_numeric_columns(results)
+
+results_clust$Income_Group <- results$Income_Group
+
+df_num <- results_clust[,-ncol(results_clust)] 
+
+scaled_df <- scale(df_num)
+
+attributes(scaled_df)$`scaled:center`
+attributes(scaled_df)$`scaled:scale`
+
+```
+```{r}
+library(factoextra)
+fviz_nbclust(scaled_df, kmeans, method = "silhouette") +  
+  labs(subtitle = "Silhouette method")
+```
+We will opt for the Silhouette method as silhouette analysis can be used to study the separation distance between the resulting clusters and can be considered a better method compared to the Elbow method.
+
+```{r}
+library(cluster)
+km_res <- kmeans(scaled_df, centers = 4)  
+
+sil <- silhouette(km_res$cluster, dist(scaled_df))
+fviz_silhouette(sil) + theme_minimal()
+```
+
+
+```{r}
+
+df_dist_euc <- dist(scaled_df, method = "euclidean")
+```
+
+```{r}
+hclust_single <- hclust(df_dist_euc, method = "single")
+hclust_complete <- hclust(df_dist_euc, method = "complete")
+hclust_average <- hclust(df_dist_euc, method = "average")
+hclust_centroid <- hclust(df_dist_euc, method = "centroid")
+hclust_ward <- hclust(df_dist_euc, method = "ward.D2")
+```
+
+```{r}
+
+df_num %>%
+  mutate(cluster = cutree(hclust_ward, k = 4)) %>% 
+  group_by(cluster) %>%
+  summarise(across(everything(), list(Average = mean))) 
+```
+
+Above we can see cluster two has the highest subscriber and video views amount, which for a domain perspective are very important factors to becoming a successful YouTuber. So here we will extract cluster two to gather more information.
+
+
+```{r}
+hfit <- hclust_ward
+par(mar = c(0, 0, 0, 0))
+plot(as.phylo(hfit), cex = 0.7, label.offset = 0.01)
+```
+
+```{r}
+km <- kmeans(scaled_df, centers = 4) # centers specify number of clusters
+km
+```
+```{r}
+fviz_cluster(km, scaled_df, ggtheme = theme_minimal())
+```
+
+```{r}
+library(ggplot2)
+df_km <- mutate(df_num, cluster = km$cluster)
+df_km %>%
+  group_by(cluster) %>%
+  summarise(across(everything(), list(Average = mean))) 
+```
+
+Overall, the K-means clustering analysis divided the dataset into four distinct clusters, each with varying numbers of channels. The "Cluster means" section provided insights into the average values of key features for each cluster. For example, Cluster 2 had significantly higher average values for subscribers and video views, indicating channels with a large and active audience. Cluster 3 had a higher average for video uploads, suggesting channels that upload content more frequently. However, cluster two is mapped as higher indicating that YouTubers should aim to leverage more on audience loyalty (subscribers) and video views.
+
+Remember that becoming a high-income earner on YouTube takes time and effort. Consistency, dedication, and a deep understanding of your target audience are key to achieving success. Good Luck!
+
+
+
+
+# References 
+
+
+Degenhardt, F., Seifert, S., & Szymczak, S. (2019). Evaluation of variable selection methods for random forests and omics data sets. Briefings in bioinformatics, 20(2), 492–503. https://doi.org/10.1093/bib/bbx124\
+
+Pudjihartono, N., Fadason, T., Kempa-Liehr, A. W., & O'Sullivan, J. M. (2022). A Review of Feature Selection Methods for Machine Learning-Based Disease Risk Prediction. Frontiers in bioinformatics, 2, 927312. https://doi.org/10.3389/fbinf.2022.927312
+
+Ribeiro, M. T., Singh, S., & Guestrin, C. (2016). "Why Should I Trust You?": Explaining the Predictions of Any Classifier (Version 3). Retrieved from arXiv:1602.04938.
+
+Shim, M., Lee, SH. & Hwang, HJ. Inflated prediction accuracy of neuropsychiatric biomarkers caused by data leakage in feature selection. Sci Rep 11, 7980 (2021). https://doi.org/10.1038/s41598-021-87157-3
+
+Szul, T., Tabor, S., & Pancerz, K. (2021). Application of the BORUTA Algorithm to Input Data Selection for a Model Based on Rough Set Theory (RST) to Prediction Energy Consumption for Building Heating. Energies, 14(10), 2779. https://doi.org/10.3390/en14102779
